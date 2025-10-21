@@ -40,9 +40,14 @@ export default function MenuPage() {
       items: items.map((i: CartItem) => ({ producto_id: i.producto_id, cantidad: i.cantidad }))
     }
     try {
+      // Solicitar token firmado para esta mesa
+      const tResp = await fetch(`${API_PREFIX}/token/mesa/${mesaNumero}`)
+      if (!tResp.ok) throw new Error(await tResp.text())
+      const tData = await tResp.json() as { token: string }
+
       const resp = await fetch(`${API_PREFIX}/orden`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-QR-Token': tData.token },
         body: JSON.stringify(payload)
       })
       if (!resp.ok) throw new Error(await resp.text())
