@@ -1,12 +1,13 @@
 from typing import List
 import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from database import get_db
 from models import Mesa, Producto, Orden, OrdenDetalle, Pago
+from security import generate_order_token, verify_order_token, TOKEN_TTL
 
 
 router = APIRouter(prefix="/api", tags=["ordenes"])
@@ -68,8 +69,25 @@ def order_to_out(order: Orden, db: Session) -> OrderOut:
     )
 
 
+class TokenOut(BaseModel):
+    mesa_numero: int
+    token: str
+    exp: int
+    ttl: int
+
+@router.get("/token/mesa/{mesa_numero}", response_model=TokenOut)
+def obtener_token_mesa(mesa_numero: int):
+    token = generate_order_token(mesa_numero)
+    # El formato del token es "mesa:exp.signature"
+    msg, _sig = token.rsplit('.', 1)
+    _mesa_str, exp_str = msg.split(':')
+    return TokenOut(mesa_numero=mesa_numero, token=token, exp=int(exp_str), ttl=TOKEN_TTL)
+
 @router.post("/orden", response_model=OrderOut)
-async def crear_orden(payload: OrderCreate, request: Request, db: Session = Depends(get_db)):
+async def crear_orden(payload: OrderCreate, request: Request, db: Session = Depends(get_db), qr_token: str | None = Header(default=None, alias='X-QR-Token')):
+    # Verificar token obligatorio para prevención de abuso
+    verify_order_token(qr_token or "", expected_mesa_numero=payload.mesa_numero)
+    
     mesa = db.query(Mesa).filter(Mesa.numero == payload.mesa_numero).first()
     if not mesa:
         # Crear mesa automáticamente si no existe
