@@ -50,10 +50,10 @@ export default function AdminPage() {
   const pollTimerRef = useRef<number | null>(null)
   const keepAliveTimerRef = useRef<number | null>(null)
 
-  const [activeTab, setActiveTab] = useState<'cocina' | 'tickets' | 'productos'>(() => {
+  const [activeTab, setActiveTab] = useState<'cocina' | 'tickets' | 'productos' | 'qr'>(() => {
     try {
       const saved = localStorage.getItem('admin_active_tab')
-      if (saved === 'cocina' || saved === 'tickets' || saved === 'productos') return saved as any
+      if (saved === 'cocina' || saved === 'tickets' || saved === 'productos' || saved === 'qr') return saved as any
     } catch {}
     return 'cocina'
   })
@@ -64,6 +64,26 @@ export default function AdminPage() {
   const [productos, setProductos] = useState<ProductoOut[]>([])
   const [prodError, setProdError] = useState<string | null>(null)
   const [nuevoProd, setNuevoProd] = useState<ProductoDraft>({ nombre: '', precio: '', imagen: '' })
+
+  // Estado para QR
+  const [qrBaseUrl, setQrBaseUrl] = useState<string>('')
+  const [qrTotalMesas, setQrTotalMesas] = useState<string>('')
+  const [qrError, setQrError] = useState<string | null>(null)
+  const [qrBusy, setQrBusy] = useState<boolean>(false)
+  const [qrPreviewSrc, setQrPreviewSrc] = useState<string>('')
+  const [qrPreviewMesa, setQrPreviewMesa] = useState<string>('')
+
+  const [qrStyle, setQrStyle] = useState<string>('square')
+  const [qrFill, setQrFill] = useState<string>('#000000')
+  const [qrBack, setQrBack] = useState<string>('#FFFFFF')
+  const [qrGradient, setQrGradient] = useState<string>('none')
+  const [qrLogoUrl, setQrLogoUrl] = useState<string>('')
+  const [qrLabel, setQrLabel] = useState<string>('')
+  const [qrLabelPos, setQrLabelPos] = useState<string>('bottom')
+  const [qrLabelColor, setQrLabelColor] = useState<string>('#000000')
+  // nuevos: estilo y fondo de etiqueta
+  const [qrLabelStyle, setQrLabelStyle] = useState<string>('plain')
+  const [qrLabelBg, setQrLabelBg] = useState<string>('#000000')
 
   useEffect(() => {
     // cargar órdenes iniciales
@@ -304,15 +324,32 @@ export default function AdminPage() {
 
   // Gestión de productos
   const handleProdChange = (index: number, field: keyof ProductoOut, value: string) => {
-    setProductos(prev => prev.map((p, i) => i === index ? { ...p, [field]: field === 'precio' ? Number(value) : value } as ProductoOut : p))
+    setProductos(prev => prev.map((p, i) => {
+      if (i !== index) return p
+      if (field === 'precio') {
+        const normalized = value.replace(',', '.').trim()
+        const num = Number(normalized)
+        return { ...p, precio: isNaN(num) ? p.precio : num } as ProductoOut
+      }
+      return { ...p, [field]: value } as ProductoOut
+    }))
   }
 
   const saveProducto = async (p: ProductoOut) => {
     try {
+      const nombre = p.nombre?.trim()
+      if (!nombre) {
+        setProdError('El nombre es obligatorio')
+        return
+      }
+      if (typeof p.precio !== 'number' || isNaN(p.precio)) {
+        setProdError('Precio inválido')
+        return
+      }
       const resp = await fetch(`${API_PREFIX}/producto/${p.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nombre: p.nombre, precio: p.precio, imagen: p.imagen })
+        body: JSON.stringify({ nombre, precio: p.precio, imagen: (p.imagen ?? '').trim() || undefined })
       })
       if (!resp.ok) throw new Error(await resp.text())
       const data = await resp.json() as ProductoOut
@@ -364,6 +401,91 @@ export default function AdminPage() {
     } catch {}
   }
 
+  // Cargar configuración y helpers de QR cuando se activa la pestaña
+  useEffect(() => {
+    if (activeTab !== 'qr') return
+    ;(async () => {
+      try {
+        setQrError(null)
+        const resp = await fetch(`${API_PREFIX}/admin/qr/config`)
+        if (!resp.ok) throw new Error(await resp.text())
+        const cfg = await resp.json() as { base_url: string, total_mesas: number }
+        setQrBaseUrl(cfg.base_url)
+        setQrTotalMesas(String(cfg.total_mesas || ''))
+      } catch (e: any) {
+        setQrError('No se pudo cargar configuración: ' + e.message)
+      }
+    })()
+  }, [activeTab])
+
+  const generarQrZip = async () => {
+    setQrError(null)
+    const total = Number(qrTotalMesas)
+    if (!qrBaseUrl || isNaN(total) || total < 1) { setQrError('Base URL y total de mesas son requeridos'); return }
+    setQrBusy(true)
+    try {
+      const resp = await fetch(`${API_PREFIX}/admin/qr/generar`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_url: qrBaseUrl.trim(),
+          total_mesas: total,
+          style: qrStyle,
+          fill: qrFill,
+          back: qrBack,
+          gradient: qrGradient,
+          logo_url: qrLogoUrl.trim() || undefined,
+          label: qrLabel || undefined,
+          label_pos: qrLabelPos,
+          label_color: qrLabelColor,
+          label_style: qrLabelStyle,
+          label_bg: qrLabelBg,
+        })
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      const blob = await resp.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'qr_mesas.zip'
+      document.body.appendChild(a)
+      a.click()
+      URL.revokeObjectURL(url)
+      a.remove()
+    } catch (e: any) {
+      setQrError('No se pudo generar: ' + e.message)
+    } finally {
+      setQrBusy(false)
+    }
+  }
+
+  const previewQr = async () => {
+    setQrError(null)
+    const mesa = Number(qrPreviewMesa)
+    if (!qrBaseUrl || isNaN(mesa) || mesa < 1) { setQrError('Base URL y mesa válida son requeridos'); return }
+    try {
+      const params = new URLSearchParams()
+      params.set('base_url', qrBaseUrl.trim())
+      params.set('style', qrStyle)
+      params.set('fill', qrFill)
+      params.set('back', qrBack)
+      params.set('gradient', qrGradient)
+      if (qrLogoUrl.trim()) params.set('logo_url', qrLogoUrl.trim())
+      if (qrLabel) params.set('label', qrLabel)
+      params.set('label_pos', qrLabelPos)
+      params.set('label_color', qrLabelColor)
+      params.set('label_style', qrLabelStyle)
+      params.set('label_bg', qrLabelBg)
+      const resp = await fetch(`${API_PREFIX}/admin/qr/mesa/${mesa}?` + params.toString())
+      if (!resp.ok) throw new Error(await resp.text())
+      const blob = await resp.blob()
+      const url = URL.createObjectURL(blob)
+      setQrPreviewSrc(url)
+    } catch (e: any) {
+      setQrError('No se pudo obtener previsualización: ' + e.message)
+    }
+  }
+
   return (
     <div className="w-full max-w-full sm:max-w-6xl mx-auto px-2 sm:p-4 space-y-4">
       <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
@@ -390,6 +512,9 @@ export default function AdminPage() {
         <button className={`px-3 py-1 rounded border flex items-center gap-2 ${activeTab === 'productos' ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-700 border-gray-300'}`} onClick={() => setActiveTab('productos')}>
           <span>Productos</span>
           <span className={`px-2 py-0.5 text-xs rounded-full ${activeTab === 'productos' ? 'bg-white/20 text-white' : 'bg-blue-100 text-blue-800'}`}>{productos.length}</span>
+        </button>
+        <button className={`px-3 py-1 rounded border flex items-center gap-2 ${activeTab === 'qr' ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-100 text-gray-700 border-gray-300'}`} onClick={() => setActiveTab('qr')}>
+          <span>QR</span>
         </button>
       </div>
 
@@ -553,41 +678,98 @@ export default function AdminPage() {
           </ul>
         </section>
       )}
+
+      {activeTab === 'qr' && (
+        <section className="bg-white rounded-lg shadow p-4 border-2 border-indigo-300">
+          <h2 className="font-semibold mb-3">Generación de QR</h2>
+          {qrError && <div className="text-red-600 mb-2">{qrError}</div>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Base URL</span>
+              <input className="border rounded p-2" placeholder="https://tu-dominio/orden?mesa=" value={qrBaseUrl} onChange={e => setQrBaseUrl(e.target.value)} />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Total de mesas</span>
+              <input className="border rounded p-2" placeholder="ej. 12" value={qrTotalMesas} onChange={e => setQrTotalMesas(e.target.value)} />
+            </label>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 mt-3">
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Estilo</span>
+              <select className="border rounded p-2" value={qrStyle} onChange={e => setQrStyle(e.target.value)}>
+                <option value="square">Cuadrado</option>
+                <option value="rounded">Redondeado</option>
+                <option value="circle">Círculos</option>
+                <option value="gapped_square">Cuadrado separado</option>
+              </select>
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Color de módulos</span>
+              <input type="color" className="border rounded p-2 h-10" value={qrFill} onChange={e => setQrFill(e.target.value)} />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Color de fondo</span>
+              <input type="color" className="border rounded p-2 h-10" value={qrBack} onChange={e => setQrBack(e.target.value)} />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Gradiente</span>
+              <select className="border rounded p-2" value={qrGradient} onChange={e => setQrGradient(e.target.value)}>
+                <option value="none">Sin gradiente</option>
+                <option value="linear">Lineal</option>
+                <option value="radial">Radial</option>
+              </select>
+            </label>
+            <label className="flex flex-col md:col-span-2">
+              <span className="text-xs text-gray-600 mb-1">Logo (URL opcional)</span>
+              <input className="border rounded p-2" placeholder="https://..." value={qrLogoUrl} onChange={e => setQrLogoUrl(e.target.value)} />
+            </label>
+            <label className="flex flex-col md:col-span-2">
+              <span className="text-xs text-gray-600 mb-1">Texto/etiqueta</span>
+              <input className="border rounded p-2" placeholder="p. ej. Mesa 1" value={qrLabel} onChange={e => setQrLabel(e.target.value)} />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Posición etiqueta</span>
+              <select className="border rounded p-2" value={qrLabelPos} onChange={e => setQrLabelPos(e.target.value)}>
+                <option value="bottom">Abajo</option>
+                <option value="top">Arriba</option>
+                <option value="center">Centro</option>
+              </select>
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Color etiqueta</span>
+              <input type="color" className="border rounded p-2 h-10" value={qrLabelColor} onChange={e => setQrLabelColor(e.target.value)} />
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Estilo etiqueta</span>
+              <select className="border rounded p-2" value={qrLabelStyle} onChange={e => setQrLabelStyle(e.target.value)}>
+                <option value="plain">Simple</option>
+                <option value="banner">Banner</option>
+              </select>
+            </label>
+            <label className="flex flex-col">
+              <span className="text-xs text-gray-600 mb-1">Fondo etiqueta</span>
+              <input type="color" className="border rounded p-2 h-10" value={qrLabelBg} onChange={e => setQrLabelBg(e.target.value)} />
+            </label>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button className="px-3 py-1 rounded bg-indigo-600 text-white disabled:opacity-50" disabled={qrBusy} onClick={generarQrZip}>
+              {qrBusy ? 'Generando...' : 'Generar ZIP'}
+            </button>
+            <label className="flex items-center gap-2">
+              <span className="text-xs text-gray-600">Vista previa mesa</span>
+              <input className="border rounded p-1 w-20" value={qrPreviewMesa} onChange={e => setQrPreviewMesa(e.target.value)} />
+              <button className="px-3 py-1 rounded bg-gray-200" onClick={previewQr}>Ver</button>
+            </label>
+          </div>
+          {qrPreviewSrc && (
+            <div className="mt-3">
+              <img src={qrPreviewSrc} alt="QR preview" className="w-40 border rounded" />
+            </div>
+          )}
+          <p className="mt-3 text-xs text-gray-600">Tip: usa el botón ZIP para descargar todos los PNG en un archivo comprimido.</p>
+        </section>
+      )}
+
     </div>
   )
-
-  useEffect(() => {
-    try { localStorage.setItem('admin_active_tab', activeTab) } catch {}
-  }, [activeTab])
-
-  // Persist Cocina controls on change
-  useEffect(() => { try { localStorage.setItem('cocina_sort', cocinaSort) } catch {} }, [cocinaSort])
-  useEffect(() => { try { localStorage.setItem('cocina_compact', cocinaCompact ? '1' : '0') } catch {} }, [cocinaCompact])
-  useEffect(() => { try { localStorage.setItem('cocina_critical', cocinaCriticalOnly ? '1' : '0') } catch {} }, [cocinaCriticalOnly])
-  useEffect(() => { try { localStorage.setItem('cocina_filter', cocinaFilter) } catch {} }, [cocinaFilter])
-
-  // Load Cocina controls on mount
-  useEffect(() => {
-    try {
-      const s = localStorage.getItem('cocina_sort'); if (s === 'tiempo' || s === 'faltantes') setCocinaSort(s as any)
-      const c = localStorage.getItem('cocina_compact'); if (c === '1') setCocinaCompact(true)
-      const crit = localStorage.getItem('cocina_critical'); if (crit === '1') setCocinaCriticalOnly(true)
-      const f = localStorage.getItem('cocina_filter'); if (f && ['todos','tacos','quesadillas','bebidas','otros'].includes(f)) setCocinaFilter(f)
-    } catch {}
-  }, [])
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || (target as any).isContentEditable)) return
-      if (e.key === '1') setActiveTab('cocina')
-      else if (e.key === '2') setActiveTab('tickets')
-      else if (e.key === '3') setActiveTab('productos')
-      else if (e.key.toLowerCase() === 'o') setCocinaSort(s => s === 'tiempo' ? 'faltantes' : 'tiempo')
-      else if (e.key.toLowerCase() === 'c') setCocinaCompact(v => !v)
-      else if (e.key.toLowerCase() === 'f') setCocinaCriticalOnly(v => !v)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
 }

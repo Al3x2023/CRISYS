@@ -2,7 +2,7 @@ import os
 import qrcode
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "qr_codes")
-BASE_URL = os.getenv("QR_BASE_URL", "http://192.168.1.71:5173/orden?mesa=")
+BASE_URL = os.getenv("QR_BASE_URL", "https://crisys-1.onrender.com/orden?mesa=")
 TOTAL_MESAS = int(os.getenv("TOTAL_MESAS", "1"))
 
 

@@ -6,7 +6,7 @@ import hashlib
 from fastapi import HTTPException
 
 ORDER_SECRET = os.getenv("ORDER_SECRET", "dev-secret-change-me")
-TOKEN_TTL = int(os.getenv("ORDER_TOKEN_TTL", "900"))  # 15 minutos por default
+TOKEN_TTL = int(os.getenv("ORDER_TOKEN_TTL", "2400"))  # 40 minutos por default
 
 
 def _sign(message: str) -> str:

@@ -8,6 +8,7 @@ from database import Base, engine, SessionLocal
 from models import Mesa, Producto
 from routes import ordenes, productos
 from routes import finanzas
+from routes import admin
 
 class OrderWebSocketManager:
     def __init__(self):
@@ -48,6 +49,7 @@ app.state.order_manager = manager
 app.include_router(productos.router)
 app.include_router(ordenes.router)
 app.include_router(finanzas.router)
+app.include_router(admin.router)
 
 # Servir frontend (SPA) desde FastAPI si existe el build
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
