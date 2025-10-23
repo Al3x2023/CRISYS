@@ -50,6 +50,20 @@ export default function AdminPage() {
   const pollTimerRef = useRef<number | null>(null)
   const keepAliveTimerRef = useRef<number | null>(null)
 
+  // Toasts para nuevas órdenes
+  const [toasts, setToasts] = useState<{ id: number, text: string }[]>([])
+  const toastIdRef = useRef<number>(1)
+  const pushToast = (text: string) => {
+    const id = toastIdRef.current++
+    setToasts(prev => [...prev, { id, text }])
+    window.setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 4500)
+  }
+  const dismissToast = (id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }
+
   const [activeTab, setActiveTab] = useState<'cocina' | 'tickets' | 'productos' | 'qr'>(() => {
     try {
       const saved = localStorage.getItem('admin_active_tab')
@@ -115,6 +129,8 @@ export default function AdminPage() {
           const msg = JSON.parse(evt.data)
           if (msg.type === 'new_order') {
             const order: OrderOut = msg.order
+            // Aviso visual
+            pushToast(`Mesa ${order.mesa_numero} · #${order.id}`)
             setOrders(prev => {
               const idx = prev.findIndex(o => o.id === order.id)
               if (idx >= 0) { const copy = [...prev]; copy[idx] = order; return sortOrders(copy) }
@@ -497,7 +513,18 @@ export default function AdminPage() {
           </button>
         </div>
       </header>
-      {error && <div className="text-red-600">{error}</div>}
+      {error && <div className="text-red-600">{error}</div>
+
+      {/* Toasts */}
+      <div className="fixed top-3 right-3 z-50 space-y-2 pointer-events-none">
+        {toasts.map(t => (
+          <div key={t.id} className="pointer-events-auto flex items-center gap-2 rounded-lg bg-black/85 text-white px-3 py-2 shadow-lg ring-1 ring-black/20">
+            <span className="font-semibold">Nuevo pedido</span>
+            <span className="opacity-90">{t.text}</span>
+            <button className="ml-2 rounded px-2 py-1 hover:bg-white/10" onClick={() => dismissToast(t.id)}>✕</button>
+          </div>
+        ))}
+      </div>
 
       {/* Tabs: Cocina, Tickets, Productos */}
       <div className="sticky top-0 z-10 bg-white/90 backdrop-blur p-2 rounded flex items-center gap-2 flex-wrap overflow-x-auto no-scrollbar">
