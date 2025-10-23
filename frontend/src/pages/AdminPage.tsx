@@ -513,7 +513,7 @@ export default function AdminPage() {
           </button>
         </div>
       </header>
-      {error && <div className="text-red-600">{error}</div>
+      {error && <div className="text-red-600">{error}</div>}
 
       {/* Toasts */}
       <div className="fixed top-3 right-3 z-50 space-y-2 pointer-events-none">
