@@ -195,8 +195,8 @@ export default function AdminPage() {
   }, [])
 
   useEffect(() => {
-    const id = setInterval(() => setNowTs(Date.now()), 30000)
-    return () => clearInterval(id)
+    const id = window.setInterval(() => setNowTs(Date.now()), 15000)
+    return () => window.clearInterval(id)
   }, [])
 
   // Helper: asegura que las fechas ISO sin zona se interpreten como UTC
