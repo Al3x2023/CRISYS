@@ -389,14 +389,36 @@ def _build_status_summary(orders_for_ai: list[dict]) -> str:
     for o in pendientes:
         for it in o.get("items") or []:
             total_items += int(it.get("faltan") or 0)
-    primera = pendientes[0]
-    mesa = primera.get("mesa_numero") or "desconocida"
-    oid = primera.get("orden_id") or ""
-    faltan_primera = sum(int(it.get("faltan") or 0) for it in primera.get("items") or [])
+    ordenadas = sorted(pendientes, key=lambda x: int(x.get("edad_minutos") or 0), reverse=True)
+    primera = ordenadas[0]
+    mesa1 = primera.get("mesa_numero") or "desconocida"
+    oid1 = primera.get("orden_id") or ""
+    faltan1 = sum(int(it.get("faltan") or 0) for it in primera.get("items") or [])
+    if total_ordenes == 2:
+        segunda = ordenadas[1]
+        mesa2 = segunda.get("mesa_numero") or "desconocida"
+        oid2 = segunda.get("orden_id") or ""
+        return (
+            f"Tienes {total_ordenes} órdenes pendientes en cocina, con {total_items} ítems por preparar en total. "
+            f"Primero atiende la mesa {mesa1}, pedido #{oid1}, donde faltan {faltan1} piezas. "
+            f"Después sigue con la mesa {mesa2}, pedido #{oid2}."
+        )
+    if total_ordenes >= 3:
+        segunda = ordenadas[1]
+        tercera = ordenadas[2]
+        mesa2 = segunda.get("mesa_numero") or "desconocida"
+        oid2 = segunda.get("orden_id") or ""
+        mesa3 = tercera.get("mesa_numero") or "desconocida"
+        oid3 = tercera.get("orden_id") or ""
+        return (
+            f"Tienes {total_ordenes} órdenes pendientes en cocina, con {total_items} ítems por preparar en total. "
+            f"Primero atiende la mesa {mesa1}, pedido #{oid1}. "
+            f"Luego la mesa {mesa2}, pedido #{oid2}, y después la mesa {mesa3}, pedido #{oid3}. "
+            "El resto síguelas en ese mismo orden."
+        )
     return (
         f"Tienes {total_ordenes} órdenes pendientes en cocina, con {total_items} ítems por preparar en total. "
-        f"La más vieja es la de la mesa {mesa}, pedido #{oid}, donde faltan {faltan_primera} piezas. "
-        "Organiza la plancha para sacar primero esa orden."
+        f"Primero atiende la mesa {mesa1}, pedido #{oid1}, donde faltan {faltan1} piezas."
     )
 
 
@@ -558,6 +580,14 @@ def handle_voice_command(payload: VoiceCommandIn, request: Request, db: Session 
             "qué falta en cocina",
             "que falta",
             "qué falta",
+            "que orden debo atender",
+            "qué orden debo atender",
+            "que ordenes debo atender",
+            "qué ordenes debo atender",
+            "que orden debo sacar primero",
+            "qué orden debo sacar primero",
+            "que orden sigue",
+            "qué orden sigue",
         ]
     ):
         spoken = _build_status_summary(orders_for_ai)
