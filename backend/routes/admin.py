@@ -292,11 +292,17 @@ def _active_orders(db: Session) -> list[Orden]:
 
 
 def _serialize_orders_for_ai(orders: list[Orden]) -> list[dict]:
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.utcnow()
     data: list[dict] = []
     for o in orders:
+        fecha = o.fecha
+        if isinstance(fecha, datetime.datetime):
+            if fecha.tzinfo is not None:
+                fecha = fecha.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        else:
+            continue
         mesa = o.mesa.numero if o.mesa else None
-        age_min = int((now - o.fecha).total_seconds() // 60)
+        age_min = int((now - fecha).total_seconds() // 60)
         items: list[dict] = []
         for d in o.detalles:
             nombre = d.producto.nombre if d.producto else ""
