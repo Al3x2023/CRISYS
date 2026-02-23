@@ -344,6 +344,56 @@ def _parse_ai_response(raw: str) -> dict:
     return {}
 
 
+def _build_status_summary(orders_for_ai: list[dict]) -> str:
+    if not orders_for_ai:
+        return "No hay órdenes activas ahorita."
+    pendientes: list[dict] = []
+    for o in orders_for_ai:
+        faltan_total = sum(int(it.get("faltan") or 0) for it in o.get("items") or [])
+        if faltan_total > 0:
+            pendientes.append(o)
+    if not pendientes:
+        return "No hay nada pendiente en cocina, todo está entregado."
+    if len(pendientes) == 1:
+        o = pendientes[0]
+        mesa = o.get("mesa_numero") or "desconocida"
+        oid = o.get("orden_id") or ""
+        items_desc: list[str] = []
+        total_faltan = 0
+        for it in o.get("items") or []:
+            faltan = int(it.get("faltan") or 0)
+            if faltan <= 0:
+                continue
+            total_faltan += faltan
+            nombre = str(it.get("nombre") or "").lower()
+            if nombre and not nombre.startswith("taco") and "taco" in nombre:
+                nombre = "tacos " + nombre
+            unidad = "pieza" if faltan == 1 else "ítems"
+            items_desc.append(f"{faltan} {nombre or unidad}")
+        if not items_desc:
+            return f"Tienes pendiente una sola orden: la de la mesa {mesa}, pedido #{oid}. Está casi lista."
+        lista = ", ".join(items_desc[:-1]) + (" y " + items_desc[-1] if len(items_desc) > 1 else items_desc[0])
+        return (
+            f"Tienes pendiente una sola orden: la de la mesa {mesa}, pedido #{oid}. "
+            f"Ahí faltan en total {total_faltan} ítems por preparar: {lista}. "
+            "Ya casi está."
+        )
+    total_ordenes = len(pendientes)
+    total_items = 0
+    for o in pendientes:
+        for it in o.get("items") or []:
+            total_items += int(it.get("faltan") or 0)
+    primera = pendientes[0]
+    mesa = primera.get("mesa_numero") or "desconocida"
+    oid = primera.get("orden_id") or ""
+    faltan_primera = sum(int(it.get("faltan") or 0) for it in primera.get("items") or [])
+    return (
+        f"Tienes {total_ordenes} órdenes pendientes en cocina, con {total_items} ítems por preparar en total. "
+        f"La más vieja es la de la mesa {mesa}, pedido #{oid}, donde faltan {faltan_primera} piezas. "
+        "Organiza la plancha para sacar primero esa orden."
+    )
+
+
 def _find_open_order_for_mesa(db: Session, mesa_numero: int) -> Orden | None:
     mesa = db.query(Mesa).filter(Mesa.numero == mesa_numero).first()
     if not mesa:
@@ -485,6 +535,27 @@ def handle_voice_command(payload: VoiceCommandIn, request: Request, db: Session 
     text = payload.text.strip()
     orders = _active_orders(db)
     orders_for_ai = _serialize_orders_for_ai(orders)
+    low = text.lower()
+    if any(
+        p in low
+        for p in [
+            "que tenemos pendiente",
+            "qué tenemos pendiente",
+            "que ordenes faltan",
+            "qué ordenes faltan",
+            "que órdenes faltan",
+            "qué órdenes faltan",
+            "estado de pedidos",
+            "estado de las ordenes",
+            "estado de las órdenes",
+            "que falta en cocina",
+            "qué falta en cocina",
+            "que falta",
+            "qué falta",
+        ]
+    ):
+        spoken = _build_status_summary(orders_for_ai)
+        return VoiceCommandOut(spoken_response=spoken, operations=[VoiceOperation(type="query_status")])
     client = _ensure_groq_client()
     system_msg = (
         "Eres un asistente de voz para una taquería en México. "
