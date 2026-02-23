@@ -40,6 +40,15 @@ export default function AdminPage() {
   const [error, setError] = useState<string | null>(null)
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true)
   const soundRef = useRef<boolean>(true)
+  const [voiceListening, setVoiceListening] = useState<boolean>(false)
+  const [voiceBusy, setVoiceBusy] = useState<boolean>(false)
+  const [lastVoiceText, setLastVoiceText] = useState<string>('')
+  const recognitionRef = useRef<any>(null)
+  const [voiceHandsFree, setVoiceHandsFree] = useState<boolean>(() => {
+    try { return localStorage.getItem('voice_hands_free') !== '0' } catch { return true }
+  })
+  const [assistantStatus, setAssistantStatus] = useState<string>('')
+  const [assistantReply, setAssistantReply] = useState<string>('')
   const [recentDelivered, setRecentDelivered] = useState<{ orderId: number, productoId: number } | null>(null)
   const [nowTs, setNowTs] = useState<number>(Date.now())
   const [cocinaFilter, setCocinaFilter] = useState<string>('todos')
@@ -129,7 +138,6 @@ export default function AdminPage() {
           const msg = JSON.parse(evt.data)
           if (msg.type === 'new_order') {
             const order: OrderOut = msg.order
-            // Aviso visual
             pushToast(`Mesa ${order.mesa_numero} · #${order.id}`)
             setOrders(prev => {
               const idx = prev.findIndex(o => o.id === order.id)
@@ -149,13 +157,16 @@ export default function AdminPage() {
                 const prevMissing = prevOrder.items.reduce((a, it) => a + Math.max(0, (it.cantidad ?? 0) - (it.entregados ?? 0)), 0)
                 const newMissing = order.items.reduce((a, it) => a + Math.max(0, (it.cantidad ?? 0) - (it.entregados ?? 0)), 0)
                 const copy = [...prev]; copy[idx] = order
-                if (newMissing > prevMissing && soundRef.current) beep() // nuevos ítems o aumentos en cocina
+                if (newMissing > prevMissing && soundRef.current) beep()
                 return sortOrders(copy)
               }
-              if (soundRef.current) beep() // por si llega como nueva
+              if (soundRef.current) beep()
               return sortOrders([...prev, order])
             })
           } else if (msg.type === 'order_paid') {
+            const id: number = msg.orden_id
+            setOrders(prev => prev.filter(o => o.id !== id))
+          } else if (msg.type === 'order_cancelled') {
             const id: number = msg.orden_id
             setOrders(prev => prev.filter(o => o.id !== id))
           }
@@ -417,6 +428,148 @@ export default function AdminPage() {
     } catch {}
   }
 
+  const speak = (text: string) => {
+    if (!text) return
+    try {
+      const utter = new SpeechSynthesisUtterance(text)
+      utter.lang = 'es-MX'
+      window.speechSynthesis.cancel()
+      window.speechSynthesis.speak(utter)
+    } catch {}
+  }
+
+  const sendVoiceCommand = async (text: string) => {
+    if (!text.trim()) return
+    setVoiceBusy(true)
+    setAssistantStatus('Enviando a asistente…')
+    try {
+      const resp = await fetch(`${API_PREFIX}/admin/voice/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      if (!resp.ok) {
+        throw new Error(await resp.text())
+      }
+      const data = await resp.json() as { spoken_response: string }
+      setAssistantReply(data.spoken_response || '')
+      setAssistantStatus('Respondido')
+      speak(data.spoken_response)
+    } catch (e: any) {
+      alert('No se pudo procesar el comando de voz: ' + (e?.message || e))
+      setAssistantStatus('Error')
+    } finally {
+      setVoiceBusy(false)
+    }
+  }
+
+  const toggleVoice = () => {
+    if (voiceListening) {
+      try { recognitionRef.current && recognitionRef.current.stop() } catch {}
+      setVoiceListening(false)
+      return
+    }
+    const w: any = window as any
+    const Rec = w.SpeechRecognition || w.webkitSpeechRecognition
+    if (!Rec) {
+      alert('Tu navegador no soporta reconocimiento de voz.')
+      return
+    }
+    const rec = new Rec()
+    recognitionRef.current = rec
+    rec.lang = 'es-MX'
+    rec.continuous = false
+    rec.interimResults = false
+    rec.maxAlternatives = 1
+    rec.onresult = (event: any) => {
+      try {
+        const transcript = String(event.results[0][0].transcript || '')
+        setLastVoiceText(transcript)
+        setVoiceListening(false)
+        sendVoiceCommand(transcript)
+      } catch {
+        setVoiceListening(false)
+      }
+    }
+    rec.onerror = () => {
+      setVoiceListening(false)
+    }
+    rec.onend = () => {
+      setVoiceListening(false)
+    }
+    try {
+      setVoiceListening(true)
+      rec.start()
+    } catch {
+      setVoiceListening(false)
+    }
+  }
+
+  const matchesWake = (t: string) => {
+    const x = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    return (
+      x.includes('que falta') ||
+      x.includes('que tenemos pendiente') ||
+      x.includes('tenemos pendiente') ||
+      x.includes('que ordenes faltan') ||
+      x.includes('ordenes faltan') ||
+      x.includes('que órdenes faltan') ||
+      x.includes('órdenes faltan') ||
+      x.includes('estado de pedidos') ||
+      x.includes('quien va') ||
+      x.includes('quién va')
+    )
+  }
+
+  const ensureVoiceActive = () => {
+    const w: any = window as any
+    const Rec = w.SpeechRecognition || w.webkitSpeechRecognition
+    if (!Rec) return
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop() } catch {}
+    }
+    const rec = new Rec()
+    recognitionRef.current = rec
+    rec.lang = 'es-MX'
+    rec.continuous = true
+    rec.interimResults = false
+    rec.maxAlternatives = 1
+    rec.onresult = (event: any) => {
+      try {
+        const transcript = String(event.results[event.results.length - 1][0].transcript || '')
+        setLastVoiceText(transcript)
+        setAssistantStatus('Comando detectado')
+        if (matchesWake(transcript)) {
+          setAssistantStatus('Despertó: enviando')
+          sendVoiceCommand(transcript)
+        }
+      } catch {}
+    }
+    rec.onerror = () => {}
+    rec.onend = () => {
+      if (voiceHandsFree) {
+        try { setTimeout(() => { try { rec.start() } catch {} }, 200) } catch {}
+      } else {
+        setVoiceListening(false)
+      }
+    }
+    try {
+      rec.start()
+      setVoiceListening(true)
+    } catch {}
+  }
+
+  useEffect(() => {
+    if (voiceHandsFree) {
+      try { localStorage.setItem('voice_hands_free', '1') } catch {}
+      ensureVoiceActive()
+    } else {
+      try { localStorage.setItem('voice_hands_free', '0') } catch {}
+      try { recognitionRef.current && recognitionRef.current.stop() } catch {}
+      setVoiceListening(false)
+    }
+  }, [voiceHandsFree])
+
   // Cargar configuración y helpers de QR cuando se activa la pestaña
   useEffect(() => {
     if (activeTab !== 'qr') return
@@ -511,6 +664,34 @@ export default function AdminPage() {
           <button className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300" onClick={() => { setSoundEnabled(v => { soundRef.current = !v; return !v }) }}>
             {soundEnabled ? '🔔 Sonido' : '🔕 Silencio'}
           </button>
+          <button
+            className={`px-2 py-1 rounded border flex items-center gap-1 ${voiceListening ? 'bg-red-600 text-white border-red-600' : 'bg-blue-600 text-white border-blue-600'}`}
+            onClick={toggleVoice}
+            disabled={voiceBusy}
+          >
+            <span>{voiceListening ? '🎙 Escuchando...' : '🎤 Asistente'}</span>
+          </button>
+          <button
+            className={`px-2 py-1 rounded border ${voiceHandsFree ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-gray-100 text-gray-700 border-gray-300'}`}
+            onClick={() => setVoiceHandsFree(v => !v)}
+          >
+            {voiceHandsFree ? '🎧 Manos libres ON' : '🎧 Manos libres OFF'}
+          </button>
+          {lastVoiceText && (
+            <span className="text-xs text-gray-500 max-w-xs truncate">
+              Último comando: “{lastVoiceText}”
+            </span>
+          )}
+          {assistantStatus && (
+            <span className="text-xs px-2 py-0.5 rounded bg-indigo-100 text-indigo-800">
+              {assistantStatus}
+            </span>
+          )}
+          {assistantReply && (
+            <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-800 max-w-xs truncate">
+              "{assistantReply}"
+            </span>
+          )}
         </div>
       </header>
       {error && <div className="text-red-600">{error}</div>}

@@ -5,17 +5,18 @@ from pydantic import BaseModel, Field
 import io
 import zipfile
 import qrcode
+import os
+import json
+import datetime
 
 from database import get_db
-from models import Mesa
+from models import Mesa, Orden, OrdenDetalle, Producto, Pago
 from qrcode.image.styledpil import StyledPilImage
 from qrcode.image.styles.moduledrawers import SquareModuleDrawer, RoundedModuleDrawer, CircleModuleDrawer, GappedSquareModuleDrawer
 from qrcode.image.styles.colormasks import SolidFillColorMask
 from PIL import Image, ImageDraw, ImageFont
 import urllib.request
-
-from database import get_db
-from models import Mesa
+from groq import Groq
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -264,3 +265,278 @@ def generar_qr_zip(req: QrGenRequest):
     fname = req.filename or "qr_mesas.zip"
     headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
     return StreamingResponse(zip_buf, media_type="application/zip", headers=headers)
+
+
+class VoiceCommandIn(BaseModel):
+    text: str
+
+
+class VoiceOperation(BaseModel):
+    type: str
+    order_id: int | None = None
+    mesa_numero: int | None = None
+    producto_nombre: str | None = None
+    cantidad: int | None = None
+    estado: str | None = None
+
+
+class VoiceCommandOut(BaseModel):
+    spoken_response: str
+    operations: list[VoiceOperation]
+
+
+def _active_orders(db: Session) -> list[Orden]:
+    orders = db.query(Orden).order_by(Orden.fecha.asc()).all()
+    visibles = [o for o in orders if db.query(Pago).filter(Pago.orden_id == o.id).first() is None]
+    return visibles
+
+
+def _serialize_orders_for_ai(orders: list[Orden]) -> list[dict]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    data: list[dict] = []
+    for o in orders:
+        mesa = o.mesa.numero if o.mesa else None
+        age_min = int((now - o.fecha).total_seconds() // 60)
+        items: list[dict] = []
+        for d in o.detalles:
+            nombre = d.producto.nombre if d.producto else ""
+            entregados = int(getattr(d, "entregados", 0))
+            faltan = max(0, d.cantidad - entregados)
+            items.append(
+                {
+                    "producto_id": d.producto_id,
+                    "nombre": nombre,
+                    "cantidad": d.cantidad,
+                    "entregados": entregados,
+                    "faltan": faltan,
+                }
+            )
+        data.append(
+            {
+                "orden_id": o.id,
+                "mesa_numero": mesa,
+                "estado": o.estado,
+                "edad_minutos": age_min,
+                "items": items,
+            }
+        )
+    return data
+
+
+def _ensure_groq_client() -> Groq:
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Falta configurar GROQ_API_KEY en el entorno del servidor")
+    return Groq(api_key=api_key)
+
+
+def _parse_ai_response(raw: str) -> dict:
+    try:
+        return json.loads(raw)
+    except Exception:
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(raw[start : end + 1])
+        except Exception:
+            return {}
+    return {}
+
+
+def _find_open_order_for_mesa(db: Session, mesa_numero: int) -> Orden | None:
+    mesa = db.query(Mesa).filter(Mesa.numero == mesa_numero).first()
+    if not mesa:
+        return None
+    orders = (
+        db.query(Orden)
+        .filter(Orden.mesa_id == mesa.id)
+        .order_by(Orden.fecha.desc())
+        .all()
+    )
+    for o in orders:
+        if db.query(Pago).filter(Pago.orden_id == o.id).first() is None:
+            return o
+    return None
+
+
+def _apply_voice_operations(ops: list[dict], request: Request, db: Session) -> list[VoiceOperation]:
+    applied: list[VoiceOperation] = []
+    for op in ops:
+        t = str(op.get("type") or "").lower()
+        if t == "query_status":
+            applied.append(VoiceOperation(type="query_status"))
+        elif t == "set_order_state_by_id":
+            order_id = op.get("order_id")
+            estado = op.get("estado")
+            if isinstance(order_id, int) and isinstance(estado, str):
+                order = db.get(Orden, order_id)
+                if not order:
+                    continue
+                order.estado = estado
+                db.commit()
+                db.refresh(order)
+                try:
+                    request.app.state.order_manager.broadcast(
+                        {"type": "update_status", "order": {"id": order.id, "estado": order.estado}}
+                    )
+                except Exception:
+                    pass
+                applied.append(
+                    VoiceOperation(
+                        type="set_order_state_by_id",
+                        order_id=order.id,
+                        estado=order.estado,
+                    )
+                )
+        elif t == "increment_items_ready_by_name":
+            mesa_numero = op.get("mesa_numero")
+            producto_nombre = op.get("producto_nombre")
+            cantidad = op.get("cantidad")
+            if not (isinstance(mesa_numero, int) and isinstance(producto_nombre, str) and isinstance(cantidad, int)):
+                continue
+            order = _find_open_order_for_mesa(db, mesa_numero)
+            if not order:
+                continue
+            db.refresh(order)
+            match_det: OrdenDetalle | None = None
+            producto_nombre_l = producto_nombre.lower()
+            for d in order.detalles:
+                nombre = d.producto.nombre if d.producto else ""
+                if producto_nombre_l in nombre.lower():
+                    match_det = d
+                    break
+            if not match_det:
+                continue
+            prev_entregados = int(getattr(match_det, "entregados", 0))
+            nuevo = max(0, min(prev_entregados + cantidad, match_det.cantidad))
+            match_det.entregados = nuevo
+            match_det.entregado = nuevo >= match_det.cantidad
+            all_delivered = all(int(getattr(d, "entregados", 0)) >= d.cantidad for d in order.detalles)
+            any_delivered = any(int(getattr(d, "entregados", 0)) > 0 for d in order.detalles)
+            order.estado = "entregado" if all_delivered else ("en_proceso" if any_delivered else "pendiente")
+            db.commit()
+            db.refresh(order)
+            try:
+                items = []
+                for d in order.detalles:
+                    prod = db.get(Producto, d.producto_id)
+                    entregados = int(getattr(d, "entregados", 0))
+                    items.append(
+                        {
+                            "producto_id": d.producto_id,
+                            "nombre": prod.nombre if prod else "",
+                            "precio": float(prod.precio) if prod else 0.0,
+                            "cantidad": d.cantidad,
+                            "entregado": entregados >= d.cantidad,
+                            "entregados": entregados,
+                        }
+                    )
+                request.app.state.order_manager.broadcast(
+                    {
+                        "type": "update_order",
+                        "order": {
+                            "id": order.id,
+                            "mesa_numero": order.mesa.numero if order.mesa else None,
+                            "fecha": order.fecha.isoformat(),
+                            "estado": order.estado,
+                            "items": items,
+                            "pagado": False,
+                        },
+                    }
+                )
+            except Exception:
+                pass
+            applied.append(
+                VoiceOperation(
+                    type="increment_items_ready_by_name",
+                    order_id=order.id,
+                    mesa_numero=mesa_numero,
+                    producto_nombre=producto_nombre,
+                    cantidad=cantidad,
+                )
+            )
+        elif t == "cancel_order_by_mesa":
+            mesa_numero = op.get("mesa_numero")
+            if not isinstance(mesa_numero, int):
+                continue
+            order = _find_open_order_for_mesa(db, mesa_numero)
+            if not order:
+                continue
+            oid = order.id
+            db.delete(order)
+            db.commit()
+            try:
+                request.app.state.order_manager.broadcast({"type": "order_cancelled", "orden_id": oid})
+            except Exception:
+                pass
+            applied.append(
+                VoiceOperation(
+                    type="cancel_order_by_mesa",
+                    mesa_numero=mesa_numero,
+                    order_id=oid,
+                )
+            )
+    return applied
+
+
+@router.post("/voice/command", response_model=VoiceCommandOut)
+def handle_voice_command(payload: VoiceCommandIn, request: Request, db: Session = Depends(get_db)):
+    text = payload.text.strip()
+    orders = _active_orders(db)
+    orders_for_ai = _serialize_orders_for_ai(orders)
+    client = _ensure_groq_client()
+    system_msg = (
+        "Eres un asistente de voz para una taquería en México. "
+        "Recibes comandos de voz del taquero o administrador y tienes acceso al estado de las órdenes activas. "
+        "Tu respuesta debe estar siempre en español mexicano, con tono natural, corto y centrado en cocina y mesas. "
+        "Analiza el comando de usuario y la lista de órdenes. "
+        "Debes responder con un JSON que describa las operaciones a ejecutar y el texto que se leerá en voz alta. "
+        "Respeta exactamente el siguiente formato: "
+        "{"
+        '"operations":[{"type":"query_status"|"set_order_state_by_id"|"increment_items_ready_by_name"|"cancel_order_by_mesa",'
+        '"order_id":int opcional,'
+        '"mesa_numero":int opcional,'
+        '"producto_nombre":string opcional,'
+        '"cantidad":int opcional,'
+        '"estado":"pendiente"|"en_proceso"|"entregado" opcional}],'
+        '"spoken_response":"frase para leer en voz alta en español mexicano"'
+        "}. "
+        "No expliques el JSON, no agregues texto fuera del JSON."
+    )
+    user_payload = {
+        "command": text,
+        "ordenes": orders_for_ai,
+        "instrucciones": {
+            "ejemplos": [
+                "¿qué tenemos pendiente?",
+                "¿qué órdenes faltan?",
+                "estado de pedidos",
+                "cancelar orden mesa 4",
+                "marcar como completado pedido 23",
+                "dos de asada para la mesa uno están listos",
+            ]
+        },
+    }
+    completion = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+        temperature=0.2,
+        max_completion_tokens=512,
+    )
+    content = completion.choices[0].message.content or ""
+    parsed = _parse_ai_response(content)
+    ops = parsed.get("operations") or []
+    if not isinstance(ops, list):
+        ops = []
+    applied = _apply_voice_operations(ops, request, db)
+    spoken = parsed.get("spoken_response")
+    if not isinstance(spoken, str) or not spoken.strip():
+        if not orders:
+            spoken = "No hay órdenes activas ahorita."
+        else:
+            spoken = "Todo en orden, las comandas siguen en cocina."
+    return VoiceCommandOut(spoken_response=spoken, operations=applied)
