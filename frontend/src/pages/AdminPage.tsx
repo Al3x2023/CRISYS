@@ -433,9 +433,16 @@ export default function AdminPage() {
     try {
       const utter = new SpeechSynthesisUtterance(text)
       utter.lang = 'es-MX'
+      utter.rate = 1
+      utter.pitch = 1
+      utter.volume = 1
       window.speechSynthesis.cancel()
       window.speechSynthesis.speak(utter)
     } catch {}
+  }
+
+  const testAudio = () => {
+    speak('Prueba de audio del asistente. Hola, estamos listos.')
   }
 
   const sendVoiceCommand = async (text: string) => {
@@ -492,6 +499,7 @@ export default function AdminPage() {
       }
     }
     rec.onerror = () => {
+      setAssistantStatus('Error de reconocimiento')
       setVoiceListening(false)
     }
     rec.onend = () => {
@@ -670,6 +678,13 @@ export default function AdminPage() {
             disabled={voiceBusy}
           >
             <span>{voiceListening ? '🎙 Escuchando...' : '🎤 Asistente'}</span>
+          </button>
+          <button
+            className="px-2 py-1 rounded border bg-indigo-600 text-white border-indigo-600"
+            onClick={testAudio}
+            title="Reproducir frase de prueba para desbloquear audio del navegador"
+          >
+            🔊 Probar audio
           </button>
           <button
             className={`px-2 py-1 rounded border ${voiceHandsFree ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-gray-100 text-gray-700 border-gray-300'}`}
